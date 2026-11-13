@@ -879,6 +879,17 @@ Robust and multivariate statistics
 Nonparametric
 -------------
 
+- Negative binomial likelihood and derivatives use stable Poisson-boundary
+  calculations. Conditional logistic likelihood uses scaled iterative recurrence
+  and matched-group batches, preserving per-group overrides.
+- Cox score and martingale residuals use interval reductions while retaining
+  tie, delayed-entry and stratification semantics.
+- Categorical KDE bandwidths and cross-validation use fixed observed support
+  and aggregate repeated observations without changing their weights.
+- Type I ANOVA computes effective nested-term ranks in singular OLS designs.
+- VECM estimation uses scaled SVD and cached fitted projections; numerically
+  rank-deficient designs raise ``LinAlgError``.
+
 - The tricube kernel in ``statsmodels.nonparametric.kernels`` returns 0
   outside of its support, :math:`|u| > 1`, instead of the peak value. Results
   of :class:`~statsmodels.nonparametric.kernel_regression.KernelReg` and
