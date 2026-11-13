@@ -103,7 +103,7 @@ class GenericZeroInflated(CountModel):
         self.k_extra = self.k_inflate
 
         if len(self.exog) != len(self.exog_infl):
-            raise ValueError("exog and exog_infl have different number of"
+            raise ValueError("exog and exog_infl have different number of "
                              "observation. `missing` handling is not supported")
 
         infl_names = [f"inflate_{i}" for i in self.model_infl.data.param_names]
@@ -410,6 +410,7 @@ class GenericZeroInflated(CountModel):
                 hess_arr[i, j] = a - b
 
         # d2l/dpdw
+        pmf_main = np.exp(llf_main)
         for i in range(self.k_inflate):
             for j in range(self.k_exog):
                 hess_arr[i, j + self.k_inflate] = -(
@@ -417,7 +418,8 @@ class GenericZeroInflated(CountModel):
                     * w[zero_idx]
                     * (1 - w[zero_idx])
                     * self.exog_infl[zero_idx, i]
-                    / pmf[zero_idx]
+                    * pmf_main[zero_idx]
+                    / pmf[zero_idx] ** 2
                 ).sum()
 
         return hess_arr
@@ -450,8 +452,11 @@ class GenericZeroInflated(CountModel):
 
         hess_arr = np.zeros((dim, dim))
 
-        hess_arr[:self.k_inflate, :] = hess_arr_infl
-        hess_arr[self.k_inflate:, self.k_inflate:] = hess_arr_main
+        k_infl = self.k_inflate
+        hess_arr[:k_infl, :k_infl] = hess_arr_infl[:, :k_infl]
+        # cross block goes into the lower triangle, which is mirrored below
+        hess_arr[k_infl:, :k_infl] = hess_arr_infl[:, k_infl:].T
+        hess_arr[k_infl:, k_infl:] = hess_arr_main
 
         tri_idx = np.triu_indices(self.k_exog + self.k_inflate, k=1)
         hess_arr[tri_idx] = hess_arr.T[tri_idx]
@@ -1066,6 +1071,33 @@ class ZeroInflatedNegativeBinomialP(GenericZeroInflated):
         self.result_class_wrapper = ZeroInflatedNegativeBinomialResultsWrapper
         self.result_class_reg = L1ZeroInflatedNegativeBinomialResults
         self.result_class_reg_wrapper = L1ZeroInflatedNegativeBinomialResultsWrapper
+
+    def _hessian_main(self, params):
+        """Observed main-parameter curvature of the NB-P mixture.
+
+        A zero observation has posterior count-component probability tau.
+        Its curvature is tau*H + tau*(1-tau)*s*s.T. Nonzero observations
+        belong to the count component with probability one.
+        """
+        params_main = params[self.k_inflate:]
+        score = self.model_main.score_obs(params_main)
+        hfbb, hfba, hfaa = self.model_main.hessian_factor(params_main)
+        w = self.model_infl.predict(params[:self.k_inflate])
+        w = np.clip(w, np.finfo(float).eps, 1 - np.finfo(float).eps)
+        tau = np.ones_like(self.endog, dtype=float)
+        zero = self.endog == 0
+        pmf_main = np.exp(self.model_main.loglikeobs(params_main)[zero])
+        numerator = (1 - w[zero]) * pmf_main
+        tau[zero] = numerator / (w[zero] + numerator)
+
+        exog = self.exog
+        dim = exog.shape[1]
+        hess = np.empty((dim + 1, dim + 1))
+        hess[:-1, :-1] = (exog.T * (tau * hfbb)) @ exog
+        hess[-1, :-1] = hess[:-1, -1] = (tau * hfba) @ exog
+        hess[-1, -1] = (tau * hfaa).sum()
+        hess += (score.T * (tau * (1 - tau))) @ score
+        return hess
 
     def _get_init_kwds(self):
         kwds = super()._get_init_kwds()
