@@ -151,6 +151,12 @@ Behavior changes
   these kernels returned ``nan`` for most data. They now integrate the density
   over the support of the observations, in the units of the data, so that the
   ``cdf`` starts at 0 and ends at 1. :issue:`7195`, :pr:`10632`
+- ``KDEUnivariate`` density evaluation, distribution and survival probabilities,
+  entropy and empirical quantiles consistently exclude observations and weights
+  outside ``clip``. Previously, some fitted evaluations reused the original
+  sample. Small upper-tail probabilities are preserved instead of rounding to
+  zero when the CDF rounds to one. The meaning of ``icdf`` as empirical sample
+  quantiles is unchanged. :issue:`904`
 
 New Features and Enhancements
 =============================
@@ -259,6 +265,17 @@ Performance
   regressors are close to collinear, so for such series the statistic can
   change in the later digits. The new values agree with R (urca) and with
   high-precision arithmetic. :issue:`10601`, :pr:`10602`, :pr:`10624`
+- ``get_margeff`` with the default ``at="overall"`` computes the delta method
+  Jacobian of the average marginal effects directly instead of averaging the
+  Jacobian at each observation. Memory use no longer grows with the number of
+  observations times the number of marginal effects times the number of
+  parameters. For ``MNLogit`` with 4 categories, 28 regressors and 20,000
+  observations the peak memory drops from 3 GB to 0.09 GB. This also applies
+  to ``get_margeff`` of ``GLM`` and ``GEE``. :issue:`4158`, :pr:`10722`
+- ``KDEUnivariate.cdf`` and ``KDEUnivariate.sf`` evaluate the built-in kernels
+  more quickly, particularly for samples with many exactly repeated values,
+  while limiting temporary probability-array size. The fitted bandwidth and
+  kernel density estimate are unchanged. :issue:`904`
 
 Bug Fixes
 =========
@@ -350,6 +367,14 @@ Generalized linear models and discrete models
   ``OrderedModel`` and ``MNLogit``. Previously, multiple observations raised
   an index length error and a single observation received an incorrect label.
   :pr:`10590`
+- The analytic ``hessian`` of ``ZeroInflatedPoisson`` with logit inflation,
+  the default, set the cross derivatives between the inflation and the count
+  parameters to zero, and the formula for them was also incorrect. The
+  standard errors were too small by about 10% for the two intercepts in
+  a simulated example with 3000 observations, and by up to 0.6% for the
+  RandHIE data. ``bse``, ``cov_params``, ``conf_int`` and the p-values of the
+  results change accordingly, and ``bse`` now agrees with the standard errors
+  from a numerical Hessian. :pr:`10723`
 - ``GEE`` used the number of columns of ``exog`` for ``df_model``,
   ``df_resid`` and the default ``ddof_scale``. These are now based on the rank
   of ``exog`` as in the other models, so that a singular design can no longer
@@ -357,11 +382,6 @@ Generalized linear models and discrete models
 - ``Logit.loglike`` and ``Logit.loglikeobs`` are computed with ``logaddexp``
   and no longer overflow for large absolute values of the linear predictor.
   :issue:`3923`, :pr:`10217`
-- The ``hessian`` and ``hessian_factor`` of ``NegativeBinomialP`` had an
-  incorrect cross derivative of the regression parameters and ``alpha`` if
-  ``p`` is not 1 or 2. For example, with ``p=1.5`` the standard error of the
-  constant and of ``alpha`` were about 19% too large, and for ``p`` larger
-  than 2 the Hessian could not be inverted, so that ``bse`` was ``nan``.
 - ``Probit.loglike``, ``loglikeobs``, ``score``, ``score_obs`` and
   ``hessian`` are computed in log space. The log-likelihood was clipped to a
   constant and the Hessian was ``nan`` for extreme values of the linear
@@ -417,6 +437,8 @@ Mixed models and imputation
 - ``MixedLM.fit_regularized`` failed for models with pandas data, for example
   from a formula: ``summary`` raised a ``KeyError`` and, with pandas 3,
   ``fit_regularized`` itself failed. :issue:`8902`, :pr:`10465`
+- ``MixedLMResults.bse_re`` raised a ``ValueError`` for models with variance
+  components and pandas data, for example from a formula. :pr:`10702`
 - ``MICE.combine`` failed for results of models that do not have a
   ``_results`` attribute, for example those of ``PHReg``. :issue:`9136`,
   :pr:`10479`, :pr:`10557`
@@ -430,6 +452,15 @@ Mixed models and imputation
 Time series analysis
 --------------------
 
+- The ARIMA GLS estimator now uses the complete AR and MA lag polynomials
+  when whitening the regression data. Seasonal terms were previously
+  omitted, and nonconsecutive lags were treated as consecutive, producing
+  incorrect regression coefficient estimates. This affects
+  ``statsmodels.tsa.arima.estimators.gls.gls`` and ``ARIMA.fit`` for a model
+  with ``exog`` or a trend that is estimated with a ``method`` other than
+  ``"statespace"``, or with ``method="statespace"`` and ``gls=True``. The
+  estimates of such models with seasonal terms or nonconsecutive lags change.
+  :pr:`10713`
 - ``ARDL.predict`` with a ``start`` after the first out-of-sample observation
   returned wrong forecasts for a model with ``exog``, ``fixed`` or seasonal
   terms, and raised an ``IndexError`` if ``dynamic`` was used. The forecasts
@@ -516,6 +547,33 @@ Time series analysis
 - ``ExponentialSmoothing`` accepts ``use_boxcox="log"`` in the constructor.
   The value was documented but raised a ``TypeError``. :issue:`9135`,
   :pr:`10361`
+- ``ETSModel`` with ``initialization_method="estimated"`` (the default) and a
+  seasonal component estimates ``seasonal_periods - 1`` initial seasonal
+  states and computes the last one so that the initial seasonals sum to 0
+  (additive seasonality) or to ``seasonal_periods`` (multiplicative
+  seasonality), as R's ``forecast::ets`` does. Before, the last initial
+  seasonal was fixed to 0 or 1 and the heuristic start values were shifted or
+  divided by it. With multiplicative seasonality and a small last heuristic
+  seasonal this moved the start far from the heuristic initial states, and the
+  fit ended in a much worse optimum than ``initialization_method="heuristic"``
+  with negative forecasts for a positive series. ``start_params`` also changed
+  the ``initial_seasonal`` attribute of the model in place. The results of
+  seasonal fits with estimated initial states change: the optimum, the
+  ``initial_level`` and the initial seasonals. For example, the damped
+  additive model of the ``austourists`` data in the ETS example notebook has
+  an initial level of 24.23 instead of 29.45 (R: 24.01). ``aic``, ``aicc``
+  and ``bic`` of a given fit are computed as before, because ``df_model``
+  still counts all initial seasonals. The covariance of the parameters is
+  computed for the free initial seasonals and mapped to the computed one.
+  Before, the Hessian of all initial states was singular, so the standard
+  errors of the initial level and the initial seasonals were ``nan`` or
+  arbitrarily large, for example in the summary of the notebook example. If
+  ``initial_seasonal.<m-1>`` is fixed or bounded, all initial seasonals are
+  free parameters, as before. A fixed ``initial_level`` is a restriction, as
+  the initial seasonals still sum to 0 or m, while before the last one was
+  fixed to 0 or 1. For example, with ``fix_params({"initial_level": 30})``
+  the additive model with an additive trend of the ``austourists`` data has
+  a log-likelihood of -155.84 instead of -150.51. :issue:`8551`, :pr:`10710`
 - ``MSTL.fit`` consumed the ``inner_iter`` and ``outer_iter`` entries of
   ``stl_kwargs``, so that a second call of ``fit`` used different settings.
   :pr:`10292`
@@ -596,6 +654,13 @@ Time series analysis
   show one ``ConvergenceWarning`` with the number of replications whose
   maximum likelihood fit did not converge, instead of one warning for each of
   them. :pr:`10613`
+- ``IRAnalysis.plot`` and ``IRAnalysis.plot_cum_effects`` ignored the
+  argument ``plot_params``. It is now applied to the response curves, so that
+  their color, line width and other Matplotlib ``Line2D`` properties can be
+  set. Error bands and horizontal reference lines keep their default styles.
+  A key of ``plot_params`` that is not a ``Line2D`` property, for example
+  ``"fontsize"``, was ignored before and now raises an ``AttributeError``.
+  :issue:`380`, :pr:`10720`
 
 Statistics and tests
 --------------------
@@ -885,6 +950,13 @@ Documentation
   say that two of ``start``, ``end`` and ``periods`` must be given, and that
   the default impact date is the last observation of the previous dataset.
   :issue:`10692`, :pr:`10693`
+- Clarify how the ARIMA GLS estimator handles constants, deterministic
+  regressors, and trends in integrated models. Numerical behavior is
+  unchanged. :issue:`6159`, :pr:`10711`
+- Clarify that ``mu0`` of ``sign_test`` is the median under the null
+  hypothesis, and that the sample median is not a useful value for it when
+  the data have no ties. Numerical behavior is unchanged. :issue:`4101`,
+  :pr:`10721`
 
 Stricter Input Validation
 =========================
